@@ -61,8 +61,10 @@ def main():
         os.environ['CUDA_VISIBLE_DEVICES'] = cfg.MODEL.DEVICE_ID
     cudnn.benchmark = True
 
+    # init dataloader
     gallery_loader, query_loader, num_query, num_classes = make_test_data_loader(
         cfg)
+    # build model and load checkpoint param
     model = build_model(cfg, num_classes)
     model.load_param(cfg.TEST.WEIGHT)
 
@@ -72,6 +74,7 @@ def main():
     g_camids = []
     g_names = []
     q_names = []
+    # ===== extract feats =====
     with torch.no_grad():
         print('extract query feats...')
         for batch in query_loader:
@@ -88,37 +91,44 @@ def main():
             feats.append(feat.cpu())
             g_names.extend(paths)
 
-    # calc distmat
-    feats = torch.cat(feats, dim=0)
-    # normalize feats
-    feats = torch.nn.functional.normalize(feats, dim=1, p=2)
-    # query
-    qf = feats[:num_query]
-    # gallery
-    gf = feats[num_query:]
-    g_pids = np.array(g_pids)
-    g_camids = np.array(g_camids)
+    # ===== init vars =====
+    feats = torch.cat(feats, dim=0) # cat feats because feats is batch-wised
+    feats = torch.nn.functional.normalize(feats, dim=1, p=2) # normalize feats
+    qf = feats[:num_query]          # query feats
+    gf = feats[num_query:]          # gallery feats
+    g_pids = np.array(g_pids)       # gallery pids
+    g_camids = np.array(g_camids)   # gallery camids
+    # ===== calc euclidean distance between gallery feat and query feat =====
     m, n = qf.shape[0], gf.shape[0]
     distmat = torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
                 torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
     distmat.addmm_(1, -2, qf, gf.t())
     distmat = distmat.cpu().numpy()
+
+    # ===== find min distance of every query during id-wised =====
     num_q, num_g = distmat.shape
-    indices = np.argsort(distmat, axis=1)
-    q_nameinds = np.zeros((num_q), dtype=int)
-    distmat_id_wised = np.ones((num_q, num_classes), dtype=float)*100
+    indices = np.argsort(distmat, axis=1)   # sort distmat from low to high (distance)
+    q_nameinds = np.zeros((num_q), dtype=int)  # init query ids array for sort because query files is not ordered
+    distmat_id_wised = np.ones((num_q, num_classes), dtype=np.float32)*100
+    def get_id(x):
+        return int(x.split('_')[0])
     for q_idx in range(num_q):
         order = indices[q_idx]
-        q_nameinds[q_idx] = int(q_names[q_idx].split('.')[0])
-        for idx, ord_i in enumerate(order):
-            pid = int(g_names[ord_i].split('_')[0])
-            dist = distmat[q_idx][ord_i]
+        q_nameinds[q_idx] = int(q_names[q_idx].split('.')[0])  # get query id frome query img filename
+        names = np.array(g_names)[order].tolist()
+        pids = map(get_id, names)
+        dists = distmat[q_idx][order]
+        # find min distance of current query during id-wised
+        for pid, dist in zip(pids, dists):
             if distmat_id_wised[q_idx, pid] > dist:
                 distmat_id_wised[q_idx, pid] = dist
+    
+    # ===== sort query id from 0 to query nums =====
     orders = np.argsort(q_nameinds, axis=0)
     q_nameinds = q_nameinds[orders]
     distmat_id_wised = distmat_id_wised[orders]
 
+    # ===== write result to csv =====
     with open('../024_bag_result.csv', 'w') as f:
         for q_idx in range(num_q):
             order = np.argsort(distmat_id_wised[q_idx])
